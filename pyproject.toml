@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "genome-feature-atlas"
+version = "0.1.0"
+description = "SAE-based feature atlas for genomic foundation models"
+requires-python = ">=3.10"
+
+dependencies = [
+    "torch>=2.0",
+    "numpy",
+    "h5py",
+    "tqdm",
+    "pyBigWig",
+    "alphagenome-pytorch",
+]
