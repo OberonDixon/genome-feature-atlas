@@ -4,6 +4,10 @@ Architecture: x → center → ReLU-encoder → TopK → linear-decoder → x_ha
 Parameters: d_model=1536, n_features=16384, k=64 (matching ESMC-6B-sae-k64-codebook16384).
 
 Loss: MSE reconstruction + AuxK auxiliary loss to prevent dead features.
+
+Adapted from the Biohub ESM repository:
+  https://github.com/Biohub/esm/blob/main/cookbook/snippets/sae.py
+The TopKSAE class and SAEConfig are derived nearly verbatim from that source.
 """
 
 import math
