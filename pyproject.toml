@@ -15,4 +15,5 @@ dependencies = [
     "tqdm",
     "pyBigWig",
     "alphagenome-pytorch",
+    "wandb",
 ]
