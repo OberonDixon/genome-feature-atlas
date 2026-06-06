@@ -54,8 +54,9 @@ class EmbeddingH5Dataset(Dataset):
             for chrom in available:
                 n_bins = f[chrom]["embeddings"].shape[0]
                 for start in range(0, n_bins, chunk_size):
-                    end = min(start + chunk_size, n_bins)
-                    self._index.append((chrom, start, end))
+                    end = start + chunk_size
+                    if end <= n_bins:
+                        self._index.append((chrom, start, end))
 
         self._chroms_used = available
 
@@ -70,7 +71,7 @@ class EmbeddingH5Dataset(Dataset):
         self._ensure_open()
         chrom, start, end = self._index[idx]
         emb = self._file[chrom]["embeddings"][start:end]  # float16 numpy
-        return torch.from_numpy(emb.astype(np.float32))
+        return torch.tensor(emb, dtype=torch.float32)
 
     # ------------------------------------------------------------------
     # File handle lifecycle (fork-safe lazy open)
