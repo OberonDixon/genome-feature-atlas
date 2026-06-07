@@ -21,7 +21,6 @@ Full run:
 """
 
 import argparse
-import itertools
 import math
 import sys
 import time
@@ -227,8 +226,12 @@ def main():
         "warmup_steps": args.warmup_steps,
     }
 
+    def infinite_loader(loader):
+        while True:
+            yield from loader
+
     model.train()
-    data_iter = itertools.cycle(train_loader)
+    data_iter = infinite_loader(train_loader)
 
     # Accumulation buffer when batch_size > chunk_size
     accum_buf: list[torch.Tensor] = []
