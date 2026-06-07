@@ -16,4 +16,5 @@ dependencies = [
     "pyBigWig",
     "alphagenome-pytorch",
     "wandb",
+    "requests",
 ]
