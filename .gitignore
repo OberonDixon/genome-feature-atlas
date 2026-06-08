@@ -33,6 +33,7 @@ Thumbs.db
 
 # Experiment outputs
 outputs/
+results/
 runs/
 wandb/
 checkpoints/

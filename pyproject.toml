@@ -17,4 +17,5 @@ dependencies = [
     "alphagenome-pytorch",
     "wandb",
     "requests",
+    "pysam",
 ]

@@ -49,42 +49,84 @@ def _print_feature_header(fid: int, n_active: int, n_total_slots: int, n_feature
     print(f"{'═' * _W}")
 
 
+def _dedup_exons(exons: list[EnsemblFeature]) -> list[EnsemblFeature]:
+    """Deduplicate exons by (start, end) — same physical exon shared across transcripts."""
+    seen: set[tuple[int, int]] = set()
+    result = []
+    for e in exons:
+        key = (e.start, e.end)
+        if key not in seen:
+            seen.add(key)
+            result.append(e)
+    return result
+
+
+def _dedup_by_name(features: list[EnsemblFeature]) -> list[EnsemblFeature]:
+    seen: set[str] = set()
+    result = []
+    for f in features:
+        key = f.name or f.id
+        if key not in seen:
+            seen.add(key)
+            result.append(f)
+    return result
+
+
 def _print_region(rank: int, chrom: str, start: int, end: int, activation: float,
                   ens_features: list[EnsemblFeature]) -> None:
     coord = _fmt_coord(chrom, start, end)
     print(f"\n  [{rank + 1:>3}]  {coord:<35}  act={activation:.4f}")
 
-    genes = [f for f in ens_features if f.feature_type == "gene"]
-    regs  = [f for f in ens_features if f.feature_type == "regulatory"]
+    genes  = [f for f in ens_features if f.feature_type == "gene"]
+    regs   = [f for f in ens_features if f.feature_type == "regulatory"]
+    exons  = _dedup_exons([f for f in ens_features if f.feature_type == "exon"])
+    cdss   = _dedup_by_name([f for f in ens_features if f.feature_type == "cds"])
+    motifs = [f for f in ens_features if f.feature_type == "motif"]
+    # transcript omitted — isoform detail is redundant with gene for auditing
 
-    if not genes and not regs:
+    if not any([genes, regs, exons, cdss, motifs]):
         print("        (no overlapping Ensembl features)")
         return
 
     for g in genes:
-        sym    = g.name or g.id
+        sym     = g.name or g.id
         biotype = g.biotype or "?"
         span    = _fmt_coord(g.chrom, g.start, g.end)
         strand  = _strand_char(g.strand)
-        print(f"        gene  {sym:<22} {biotype:<20} {strand}  {span}")
+        print(f"        gene   {sym:<20} {biotype:<20} {strand}  {span}")
         if g.description:
-            truncated = g.description[:72]
-            if len(g.description) > 72:
-                truncated += "…"
-            print(f"              {truncated}")
+            trunc = g.description[:70] + ("…" if len(g.description) > 70 else "")
+            print(f"               {trunc}")
 
     for r in regs:
         subtype = r.name or r.id
         span    = _fmt_coord(r.chrom, r.start, r.end)
-        print(f"        reg   {subtype:<22} {r.id:<20} {span}")
+        print(f"        reg    {subtype:<20} {r.id:<20} {span}")
+
+    for e in exons:
+        span   = _fmt_coord(e.chrom, e.start, e.end)
+        strand = _strand_char(e.strand)
+        print(f"        exon   {e.name:<20} {e.biotype:<12} {strand}  {span}")
+
+    for c in cdss:
+        span = _fmt_coord(c.chrom, c.start, c.end)
+        print(f"        cds    {c.name:<20} {c.description}  {span}")
+
+    for m in motifs:
+        span   = _fmt_coord(m.chrom, m.start, m.end)
+        strand = _strand_char(m.strand)
+        print(f"        motif  {m.name:<20} {m.biotype:<14} {m.description}  {strand}  {span}")
 
 
-def _print_gene_summary(gene_counts: Counter, n_shown: int) -> None:
-    if not gene_counts:
-        return
-    top = gene_counts.most_common(8)
-    genes_str = "  ".join(f"{g} ({c}/{n_shown})" for g, c in top)
-    print(f"\n  Genes across {n_shown} regions: {genes_str}")
+def _print_annotation_summary(gene_counts: Counter, tf_counts: Counter, n_shown: int) -> None:
+    if gene_counts:
+        top = gene_counts.most_common(8)
+        genes_str = "  ".join(f"{g} ({c}/{n_shown})" for g, c in top)
+        print(f"\n  Genes across {n_shown} regions: {genes_str}")
+    if tf_counts:
+        top = tf_counts.most_common(6)
+        tfs_str = "  ".join(f"{t} ({c}/{n_shown})" for t, c in top)
+        print(f"  TF motifs: {tfs_str}")
 
 
 def _print_footer() -> None:
@@ -121,6 +163,7 @@ def display_feature(
 
     n_show_actual = min(n_show, n_active)
     gene_counts: Counter = Counter()
+    tf_counts:   Counter = Counter()
 
     for rank in range(n_show_actual):
         if vals[rank] <= 0:
@@ -141,8 +184,10 @@ def display_feature(
         for f in ens:
             if f.feature_type == "gene" and f.name:
                 gene_counts[f.name] += 1
+            elif f.feature_type == "motif" and f.name:
+                tf_counts[f.name] += 1
 
-    _print_gene_summary(gene_counts, n_show_actual)
+    _print_annotation_summary(gene_counts, tf_counts, n_show_actual)
     _print_footer()
 
 

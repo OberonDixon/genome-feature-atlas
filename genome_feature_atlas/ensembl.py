@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import requests
 
-_BASE = "https://rest.ensembl.org"
+_BASE = "https://grch37.rest.ensembl.org"
 _SESSION = requests.Session()
 _SESSION.headers["Accept"] = "application/json"
 
@@ -25,24 +25,27 @@ _MIN_INTERVAL = 1.0 / 12
 _last_request_t: float = 0.0
 
 
+_ALL_FEATURES = ("gene", "transcript", "exon", "cds", "regulatory", "motif")
+
+
 @dataclass
 class EnsemblFeature:
-    feature_type: str  # "gene" | "regulatory"
+    feature_type: str  # "gene" | "transcript" | "exon" | "cds" | "regulatory" | "motif"
     id: str
     chrom: str         # "chr21" style
     start: int         # Ensembl 1-based inclusive
     end: int           # Ensembl 1-based inclusive
-    strand: int        # 1, -1, or 0 (stranded / unstranded)
-    name: str          # gene symbol, or regulatory subtype (e.g. "enhancer")
-    biotype: str       # protein_coding / lncRNA / enhancer / CTCF_binding_site / …
-    description: str   # free-text description from Ensembl
+    strand: int        # 1, -1, or 0
+    name: str          # gene symbol / isoform name / TF name / exon id / protein id / regulatory subtype
+    biotype: str       # protein_coding / lncRNA / exon N / CDS / ENSPFM… / enhancer / …
+    description: str   # gene description / MANE tags / TF score / phase info
 
 
 def query_region(
     chrom: str,
     start: int,
     end: int,
-    features: tuple[str, ...] = ("gene", "regulatory"),
+    features: tuple[str, ...] = _ALL_FEATURES,
 ) -> list[EnsemblFeature]:
     """Return Ensembl features overlapping chrom:start-end.
 
@@ -71,7 +74,13 @@ def query_region(
             time.sleep(wait)
             continue
         resp.raise_for_status()
-        return [_parse(item) for item in resp.json()]
+        # Filter to features that physically overlap the query range.
+        # Necessary for "cds", which Ensembl returns all-CDS-of-overlapping-transcripts
+        # rather than only CDS whose coordinates intersect the query.
+        return [
+            _parse(item) for item in resp.json()
+            if item.get("start", 0) <= ens_end and item.get("end", 0) >= ens_start
+        ]
 
     resp.raise_for_status()  # will always raise after exhausting retries
     return []  # unreachable, satisfies type checkers
@@ -97,12 +106,39 @@ def _parse(item: dict) -> EnsemblFeature:
     chrom = f"chr{raw_chrom}" if raw_chrom and not raw_chrom.startswith("chr") else raw_chrom
 
     if ft == "gene":
-        name = item.get("external_name") or item.get("id", "")
+        name        = item.get("external_name") or item.get("id", "")
+        biotype     = item.get("biotype", "")
+        description = item.get("description") or ""
+    elif ft == "transcript":
+        name        = item.get("external_name") or item.get("id", "")
+        biotype     = item.get("biotype", "")
+        tags        = item.get("tag") or []
+        description = ",".join(tags)
+    elif ft == "exon":
+        name        = item.get("exon_id") or item.get("id", "")
+        rank        = item.get("rank", "?")
+        biotype     = f"exon {rank}"
+        description = ""
+    elif ft == "cds":
+        name        = item.get("protein_id") or item.get("id", "")
+        biotype     = "CDS"
+        phase       = item.get("phase", "?")
+        description = f"phase={phase}"
     elif ft == "regulatory":
-        # description field holds the subtype: "enhancer", "CTCF binding site", …
-        name = item.get("description") or item.get("id", "")
+        # description holds the subtype: "enhancer", "CTCF binding site", …
+        subtype     = item.get("description") or item.get("id", "")
+        name        = subtype
+        biotype     = subtype
+        description = subtype
+    elif ft == "motif":
+        name        = item.get("transcription_factor_complex") or item.get("stable_id", "")
+        biotype     = item.get("binding_matrix_stable_id", "")
+        score       = item.get("score")
+        description = f"score={score:.2f}" if score is not None else ""
     else:
-        name = item.get("id", "")
+        name        = item.get("id", "")
+        biotype     = item.get("biotype", "")
+        description = item.get("description") or ""
 
     return EnsemblFeature(
         feature_type=ft,
@@ -112,6 +148,6 @@ def _parse(item: dict) -> EnsemblFeature:
         end=item.get("end", 0),
         strand=item.get("strand", 0),
         name=name,
-        biotype=item.get("biotype", ""),
-        description=item.get("description") or "",
+        biotype=biotype,
+        description=description,
     )
