@@ -12,12 +12,26 @@ Usage:
         --features 42,100,500 \\
         --n-loci 200 \\
         [--all-features] \\
+        [--annotate] \\
+        [--background-json results/prev_background.json] \\
         [--output-json summaries.json]
 
 If --features is omitted the first 5 active features are used (quick sanity check).
 If --all-features is set, all active features are processed (may be slow with ChromHMM).
 If --chromhmm-dir is omitted, ChromHMM tissue data is skipped.
 If --annotation-dir is omitted, falls back to the Ensembl REST API (slower).
+If --annotate is set, each feature summary is passed to AnnotatorAgent (requires vLLM).
+If --background-json is set, the pre-computed background is used as LLM context.
+
+Two-pass workflow for best annotation quality:
+  # Step 1: build background from a large batch (no LLM)
+  python scripts/prototype_summary.py --input ... --features 0-199 \\
+      --output-json results/batch.json
+  # → auto-saves results/batch_background.json
+
+  # Step 2: annotate with full background context
+  python scripts/prototype_summary.py --input ... --features 45,46,47 \\
+      --annotate --background-json results/batch_background.json
 """
 
 import argparse
@@ -54,8 +68,15 @@ def parse_args() -> argparse.Namespace:
                    help="Process every active feature (may take a long time with ChromHMM)")
     p.add_argument("--n-loci",         type=int,  default=200,
                    help="Top loci per feature (default: 200)")
+    p.add_argument("--annotate",        action="store_true",
+                   help="Run AnnotatorAgent on each feature; requires vLLM at http://localhost:8000/v1")
+    p.add_argument("--background-json", type=Path, default=None,
+                   help="Pre-computed background JSON saved by a prior --output-json run "
+                        "(auto-saved as <stem>_background.json). Provides structure/TSS/chromatin "
+                        "context to the annotator; without it, only activation stats are sent.")
     p.add_argument("--output-json",    type=Path, default=None,
-                   help="Write batch JSON output to this file")
+                   help="Write batch JSON output to this file; also auto-saves "
+                        "<stem>_background.json when ≥5 features are processed")
     return p.parse_args()
 
 
@@ -87,6 +108,31 @@ def main() -> None:
     else:
         print("  Annotation source: Ensembl REST API (rate-limited; use --annotation-dir for speed)")
 
+    # Activation background: fast numpy op covering all active features.
+    act_bg = loader.global_activation_background(args.n_loci)
+
+    # Annotated background: load from a prior run if available.
+    if args.background_json:
+        with open(args.background_json) as _f:
+            _saved = json.load(_f)
+        loaded_anno_bg = _saved.get("annotated", {})
+        print(f"  Background: loaded from {args.background_json} "
+              f"({loaded_anno_bg.get('n_features', 0)} features)")
+    else:
+        loaded_anno_bg = {}
+        if args.annotate:
+            print("  Background: activation stats only (no --background-json; "
+                  "structure/TSS/chromatin context missing)")
+
+    bg_text = _fmt_background_for_agent(act_bg, loaded_anno_bg)
+
+    if args.annotate:
+        from genome_feature_atlas.agents import AnnotatorAgent, AgentContext
+        annotator_agent: AnnotatorAgent | None = AnnotatorAgent()
+        print("  Annotator: AnnotatorAgent (vLLM at http://localhost:8000/v1)")
+    else:
+        annotator_agent = None
+
     summaries: list[FeatureSummary] = []
     results:   dict[int, dict]      = {}
 
@@ -111,9 +157,16 @@ def main() -> None:
             print(f"\n{_DIV}")
             print(summary.to_text())
 
-            summaries.append(summary)
-            if args.output_json:
+            if annotator_agent is not None:
+                ctx = AgentContext(feature_summary=summary, background_text=bg_text)
+                ann = annotator_agent.run(ctx)
+                print(json.dumps(ann, indent=2, ensure_ascii=False))
+                if args.output_json:
+                    results[fid] = {**summary.to_dict(), "annotation": ann}
+            elif args.output_json:
                 results[fid] = summary.to_dict()
+
+            summaries.append(summary)
     finally:
         if chromhmm_ctx is not None:
             chromhmm_ctx.close()
@@ -121,15 +174,20 @@ def main() -> None:
             annotation_ctx.close()
 
     # ── background reference ───────────────────────────────────────────────────
-    act_bg  = loader.global_activation_background(args.n_loci)
     anno_bg = _annotated_background(summaries)
     print(f"\n{_DIV2}")
     print(_fmt_background(act_bg, anno_bg))
 
     if args.output_json:
         with open(args.output_json, "w") as f:
-            json.dump({str(k): v for k, v in results.items()}, f, indent=2)
+            json.dump({str(k): v for k, v in results.items()}, f, indent=2, ensure_ascii=False)
         print(f"JSON written to {args.output_json}")
+
+        if anno_bg.get("n_features", 0) >= 5:
+            bg_save_path = args.output_json.with_name(args.output_json.stem + "_background.json")
+            with open(bg_save_path, "w") as f:
+                json.dump({"activation": act_bg, "annotated": anno_bg}, f, indent=2)
+            print(f"Background saved to {bg_save_path}")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -198,6 +256,50 @@ def _annotated_background(summaries: list[FeatureSummary]) -> dict:
         "tss_stats":    tss_stats,
         "tissue_avg":   tissue_avg,
     }
+
+
+def _fmt_background_for_agent(act_bg: dict, anno_bg: dict) -> str:
+    """Compact background block for LLM consumption — no placeholder messages."""
+    lines = ["── Background " + "─" * 58]
+
+    n_act = act_bg.get("n_active_features", 0)
+    lines.append(f"Activation ({n_act:,} active features):")
+    for key, label in (("max_val", "max"), ("flatness", "flatness"), ("windows", "windows")):
+        d = act_bg.get(key, {})
+        p25, p50, p75 = d.get("p25", 0), d.get("p50", 0), d.get("p75", 0)
+        if key == "flatness":
+            lines.append(f"  {label:<10} p50={p50:.0%}   [p25={p25:.0%}, p75={p75:.0%}]")
+        elif key == "windows":
+            lines.append(f"  {label:<10} p50={int(p50):,}  [p25={int(p25):,}, p75={int(p75):,}]")
+        else:
+            lines.append(f"  {label:<10} p50={p50:.2f}  [p25={p25:.2f}, p75={p75:.2f}]")
+
+    n_anno = anno_bg.get("n_features", 0)
+    if n_anno >= 5:
+        lines.append(f"Annotated background ({n_anno} features):")
+        struct = anno_bg.get("struct_fracs", {})
+        _ORDER = ("CDS", "UTR", "exon", "intron", "intergenic")
+        struct_parts = [f"{lbl} {struct[lbl]:.0%}" for lbl in _ORDER if lbl in struct]
+        if struct_parts:
+            lines.append(f"  Structure:  {'  '.join(struct_parts)}")
+        tss = anno_bg.get("tss_stats")
+        if tss:
+            def _fd(bp: int) -> str:
+                s = "+" if bp >= 0 else "-"
+                a = abs(bp)
+                return f"{s}{a/1000:.1f}kb" if a >= 1000 else f"{s}{a}bp"
+            lines.append(
+                f"  TSS dist:   median {_fd(tss['median'])}  "
+                f"[p10 {_fd(tss['p10'])}, p90 {_fd(tss['p90'])}]"
+            )
+        tissue_avg = anno_bg.get("tissue_avg", {})
+        if tissue_avg:
+            lines.append("  Chromatin:")
+            for tissue, states in tissue_avg.items():
+                state_parts = [f"{STATE_NAMES.get(s, s)}({f:.0%})" for s, f in states]
+                lines.append(f"    {tissue:<20} {'  '.join(state_parts)}")
+
+    return "\n".join(lines)
 
 
 def _fmt_background(act_bg: dict, anno_bg: dict) -> str:

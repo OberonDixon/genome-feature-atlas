@@ -20,7 +20,11 @@ automatically on first boot. Subsequent boots load from cache.
 
 ```bash
 conda activate vllm
+```
 
+High-performance Qwen model:
+
+```
 vllm serve Qwen/Qwen3.6-35B-A3B \
   --quantization fp8 \
   --tensor-parallel-size 2 \
@@ -36,6 +40,17 @@ quantizes to FP8, and distributes across both GPUs. It's ready when you see:
 ```
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000
+
+```
+
+Low-performance prototype Qwen model:
+
+```
+vllm serve Qwen/Qwen3-8B \
+  --enable-prefix-caching \
+  --gpu-memory-utilization 0.85 \
+  --port 8000 \
+  --max-model-len 8192
 ```
 
 ## Verifying the server is up
