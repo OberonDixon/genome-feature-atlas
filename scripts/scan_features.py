@@ -150,6 +150,8 @@ def main() -> None:
     top_vals   = np.full((n_features, n_top), -np.inf, dtype=np.float32)
     top_starts = np.zeros((n_features, n_top), dtype=np.int32)
     top_chrom  = np.zeros((n_features, n_top), dtype=np.uint8)
+    # Counts non-overlapping windows (each window_stride_bp wide) with any positive activation.
+    total_active_counts = np.zeros(n_features, dtype=np.int32)
 
     # ------------------------------------------------------------------ scan
     with h5py.File(args.h5, "r") as f:
@@ -189,6 +191,7 @@ def main() -> None:
                         if cur_win_id >= 0:
                             _merge_window_max(top_vals, top_starts, top_chrom,
                                               win_max_vals, win_max_starts, chrom_i)
+                            total_active_counts += (win_max_vals > 0)
                         win_max_vals[:]   = 0
                         win_max_starts[:] = 0
                         cur_win_id = w_id
@@ -208,6 +211,7 @@ def main() -> None:
             if cur_win_id >= 0:
                 _merge_window_max(top_vals, top_starts, top_chrom,
                                   win_max_vals, win_max_starts, chrom_i)
+                total_active_counts += (win_max_vals > 0)
 
     # ------------------------------------------------------------------ sort per feature
     sort_idx    = np.argsort(-top_vals, axis=1)                                               # (n_features, n_top)
@@ -235,9 +239,10 @@ def main() -> None:
         out.create_dataset("chrom_names", data=np.array(chrom_names, dtype=object), dtype=str_dt)
 
         # Per-feature top-N arrays — shape (n_features, n_top)
-        out.create_dataset("activations", data=top_vals,   compression="lzf", chunks=(256, n_top))
-        out.create_dataset("starts",      data=top_starts, compression="lzf", chunks=(256, n_top))
-        out.create_dataset("chrom_idx",   data=top_chrom,  compression="lzf", chunks=(256, n_top))
+        out.create_dataset("activations",         data=top_vals,            compression="lzf", chunks=(256, n_top))
+        out.create_dataset("starts",              data=top_starts,          compression="lzf", chunks=(256, n_top))
+        out.create_dataset("chrom_idx",           data=top_chrom,           compression="lzf", chunks=(256, n_top))
+        out.create_dataset("total_active_counts", data=total_active_counts, compression="lzf")
 
     n_features_with_activations = int((top_vals > 0).any(axis=1).sum())
     print(f"Wrote {args.output}")

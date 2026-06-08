@@ -11,6 +11,7 @@ this project (bin_start, bin_start + resolution_bp). Conversion to Ensembl's
 1-based inclusive coordinates is handled internally.
 """
 
+import threading
 import time
 from dataclasses import dataclass
 
@@ -23,9 +24,13 @@ _SESSION.headers["Accept"] = "application/json"
 # Ensembl allows up to 15 req/s; we stay comfortably under that.
 _MIN_INTERVAL = 1.0 / 12
 _last_request_t: float = 0.0
-
+_rate_lock = threading.Lock()
 
 _ALL_FEATURES = ("gene", "transcript", "exon", "cds", "regulatory", "motif")
+
+# Module-level response cache: (chrom, start, end, features) → list[EnsemblFeature].
+# Eliminates repeat API calls when the same locus appears across multiple features.
+_region_cache: dict[tuple, list["EnsemblFeature"]] = {}
 
 
 @dataclass
@@ -58,6 +63,10 @@ def query_region(
     Returns a list of EnsemblFeature, possibly empty if nothing overlaps.
     Raises requests.HTTPError on unrecoverable API errors.
     """
+    key = (chrom, start, end, features)
+    if key in _region_cache:
+        return _region_cache[key]
+
     ensembl_chrom = chrom.removeprefix("chr")
     ens_start = start + 1   # 0-based → 1-based inclusive
     ens_end = end            # 0-based exclusive == 1-based inclusive (same integer)
@@ -68,36 +77,46 @@ def query_region(
 
     for attempt in range(4):
         resp = _SESSION.get(url, params=params, timeout=30)
-        _touch_last()
         if resp.status_code == 429:
             wait = float(resp.headers.get("Retry-After", 2 ** attempt))
             time.sleep(wait)
+            _rate_limit()  # re-claim a slot after the back-off
             continue
         resp.raise_for_status()
         # Filter to features that physically overlap the query range.
         # Necessary for "cds", which Ensembl returns all-CDS-of-overlapping-transcripts
         # rather than only CDS whose coordinates intersect the query.
-        return [
+        result = [
             _parse(item) for item in resp.json()
             if item.get("start", 0) <= ens_end and item.get("end", 0) >= ens_start
         ]
+        _region_cache[key] = result
+        return result
 
     resp.raise_for_status()  # will always raise after exhausting retries
     return []  # unreachable, satisfies type checkers
 
 
+def clear_cache() -> None:
+    """Clear the in-process response cache."""
+    _region_cache.clear()
+
+
 # ── internals ────────────────────────────────────────────────────────────────
 
 def _rate_limit() -> None:
-    global _last_request_t
-    elapsed = time.monotonic() - _last_request_t
-    if elapsed < _MIN_INTERVAL:
-        time.sleep(_MIN_INTERVAL - elapsed)
+    """Claim a request slot, sleeping if necessary to respect the rate limit.
 
-
-def _touch_last() -> None:
+    Thread-safe: holds _rate_lock while updating _last_request_t so concurrent
+    callers queue up and each gets a distinct 83 ms slot rather than racing to
+    send requests simultaneously.
+    """
     global _last_request_t
-    _last_request_t = time.monotonic()
+    with _rate_lock:
+        elapsed = time.monotonic() - _last_request_t
+        if elapsed < _MIN_INTERVAL:
+            time.sleep(_MIN_INTERVAL - elapsed)
+        _last_request_t = time.monotonic()
 
 
 def _parse(item: dict) -> EnsemblFeature:

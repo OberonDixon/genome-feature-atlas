@@ -28,6 +28,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from genome_feature_atlas.chromhmm import (
+    STATE_NAMES,
     TISSUE_GROUPS,
     ChromHMMLookup,
     summarize_feature,
@@ -41,8 +42,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--input", required=True, type=Path, help="feature_top200.h5 from scan_features.py")
     p.add_argument("--data-dir", required=True, type=Path, help="Directory with E*_15_coreMarks_dense.bed.bgz files")
     p.add_argument("--n-loci", type=int, default=10, help="Top loci per feature to include in summary (default: 10)")
-    p.add_argument("--active-threshold", type=float, default=0.1, help="active_fraction cutoff for active_in (default: 0.1)")
-    p.add_argument("--min-state-frac", type=float, default=0.05, help="Min fraction for state to appear in top_non_quies (default: 0.05)")
     p.add_argument("--features", type=str, default=None, help="Comma-separated feature IDs to inspect (default: all in order)")
     p.add_argument("--start-from", type=int, default=0, help="Start iteration at this feature index (default: 0)")
     p.add_argument("--output", type=Path, default=None, help="Write all summaries to this JSON file (batch mode)")
@@ -60,42 +59,22 @@ def _print_feature_header(fid: int, n_active: int, n_slots: int, n_features: int
     print(f"{'═' * _W}")
 
 
-def _format_top_non_quies(top: dict[str, float]) -> str:
-    if not top:
-        return "—"
-    return "  ".join(f"{s}({v:.2f})" for s, v in top.items())
-
-
 def _print_summary(summary: dict, n_loci: int) -> None:
-    active_in  = summary["active_in"]
-    inactive_in = summary["inactive_in"]
     matrix = summary["matrix"]
 
     print(f"\n  ChromHMM summary ({n_loci} loci × 15-state model, hg19)\n")
-
-    if active_in:
-        print(f"  Active in:    {', '.join(active_in)}")
-    else:
-        print("  Active in:    (none)")
-    if inactive_in:
-        print(f"  Inactive in:  {', '.join(inactive_in)}")
-    print()
-
-    # table header
-    col1, col2, col3, col4 = 20, 14, 10, 0
-    hdr = f"  {'Tissue':<{col1}}  {'dominant':<{col2}}  {'act_frac':<{col3}}  top non-quiescent"
-    print(hdr)
+    print(f"  {'Tissue':<22}  top states")
     print(f"  {'─' * (_W - 2)}")
 
     for tissue in _TISSUE_ORDER:
         if tissue not in matrix:
             continue
-        m = matrix[tissue]
-        dominant = m["dominant"]
-        af = m["active_fraction"]
-        top_str = _format_top_non_quies(m["top_non_quies"])
-        marker = "*" if af >= 0.1 else " "
-        print(f"{marker} {tissue:<{col1}}  {dominant:<{col2}}  {af:<{col3}.3f}  {top_str}")
+        top_states = matrix[tissue]["top_states"]
+        state_str = "  ".join(
+            f"{STATE_NAMES.get(s, s)}({f:.0%})"
+            for s, f in top_states
+        )
+        print(f"  {tissue:<22}  {state_str}")
 
 
 def _print_footer() -> None:
@@ -114,16 +93,13 @@ def compute_feature_summary(
     lookup: ChromHMMLookup,
     n_loci: int,
     resolution_bp: int,
-    active_threshold: float,
-    min_state_frac: float,
 ) -> dict | None:
     """Compute ChromHMM tissue summary for one SAE feature. Returns None if no activations."""
-    vals  = activations[fid]   # (n_top,) float32, sorted desc
-    sts   = starts[fid]        # (n_top,) int32
-    cidxs = chrom_idx[fid]     # (n_top,) uint8
+    vals  = activations[fid]
+    sts   = starts[fid]
+    cidxs = chrom_idx[fid]
 
-    active_mask = vals > 0
-    n_active = int(active_mask.sum())
+    n_active = int((vals > 0).sum())
     if n_active == 0:
         return None
 
@@ -133,12 +109,7 @@ def compute_feature_summary(
         for r in range(n_use)
         if vals[r] > 0
     ]
-    return summarize_feature(
-        loci, lookup,
-        resolution_bp=resolution_bp,
-        active_threshold=active_threshold,
-        min_state_frac=min_state_frac,
-    )
+    return summarize_feature(loci, lookup, resolution_bp=resolution_bp)
 
 
 def display_feature(
@@ -151,8 +122,6 @@ def display_feature(
     n_loci: int,
     resolution_bp: int,
     n_features: int,
-    active_threshold: float,
-    min_state_frac: float,
 ) -> None:
     vals = activations[fid]
     n_active = int((vals > 0).sum())
@@ -167,7 +136,7 @@ def display_feature(
 
     summary = compute_feature_summary(
         fid, activations, starts, chrom_idx, chrom_names,
-        lookup, n_loci, resolution_bp, active_threshold, min_state_frac,
+        lookup, n_loci, resolution_bp,
     )
     if summary is None:
         print("  (summary unavailable)")
@@ -212,7 +181,6 @@ def main() -> None:
                 summary = compute_feature_summary(
                     fid, activations, starts, chrom_idx, chrom_names,
                     lookup, args.n_loci, resolution_bp,
-                    args.active_threshold, args.min_state_frac,
                 )
                 if summary is not None:
                     results[str(fid)] = summary
@@ -231,7 +199,6 @@ def main() -> None:
             display_feature(
                 fid, activations, starts, chrom_idx, chrom_names,
                 lookup, args.n_loci, resolution_bp, n_features,
-                args.active_threshold, args.min_state_frac,
             )
 
             try:

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pysam
@@ -77,8 +78,26 @@ TISSUE_GROUPS: dict[str, list[str]] = {
     ],
 }
 
-# States that count as quiescent/inactive for active_fraction calculation.
+# States considered quiescent (only used to define the boundary of the state space).
 QUIESCENT_STATES: frozenset[str] = frozenset({"15_Quies"})
+
+STATE_NAMES: dict[str, str] = {
+    "1_TssA":     "Active TSS",
+    "2_TssAFlnk": "Flanking TSS",
+    "3_TxFlnk":   "Tx 5'/3'",
+    "4_Tx":        "Strong transcription",
+    "5_TxWk":      "Weak transcription",
+    "6_EnhG":      "Genic enhancer",
+    "7_Enh":       "Distal enhancer",
+    "8_ZNF/Rpts":  "ZNF/Repeats",
+    "9_Het":       "Heterochromatin",
+    "10_TssBiv":   "Bivalent TSS",
+    "11_BivFlnk":  "Flanking bivalent",
+    "12_EnhBiv":   "Bivalent enhancer",
+    "13_ReprPC":   "Polycomb repressed",
+    "14_ReprPCWk": "Weak Polycomb",
+    "15_Quies":    "Quiescent",
+}
 
 _EID_RE = re.compile(r"^(E\d{3})_")
 
@@ -165,46 +184,49 @@ def summarize_feature(
     loci: list[tuple[str, int]],
     lookup: ChromHMMLookup,
     resolution_bp: int = 128,
-    active_threshold: float = 0.1,
-    min_state_frac: float = 0.05,
+    n_top_states: int = 2,
 ) -> dict:
     """Aggregate ChromHMM states across loci and tissues into a compact summary.
 
     For each tissue group the function pools states across all
-    (locus × cells_in_group) pairs, then computes:
-      - dominant state (most common, may be 15_Quies)
-      - active_fraction (fraction of pairs not in QUIESCENT_STATES)
-      - top_non_quies (state fractions for non-quiescent states ≥ min_state_frac)
+    (locus × cells_in_group) pairs, then returns the top-N states by fraction.
 
     Args:
-        loci:             list of (chrom, start) 0-based positions
-        lookup:           open ChromHMMLookup
-        resolution_bp:    bin width in bp
-        active_threshold: active_fraction cutoff for active_in / inactive_in
-        min_state_frac:   minimum fraction for a state to appear in top_non_quies
+        loci:          list of (chrom, start) 0-based positions
+        lookup:        open ChromHMMLookup
+        resolution_bp: bin width in bp
+        n_top_states:  how many top states to retain per tissue
 
     Returns:
         {
-            "active_in":  [tissue, ...],
-            "inactive_in": [tissue, ...],
             "matrix": {
                 tissue: {
-                    "dominant": state,
-                    "active_fraction": float,
-                    "top_non_quies": {state: fraction, ...}
+                    "top_states": [(state_key, fraction), ...]  # n_top_states entries
                 },
                 ...
             }
         }
     """
-    # accumulate {tissue: [state, ...]} across all loci
-    tissue_states: dict[str, list[str]] = {t: [] for t in TISSUE_GROUPS}
+    # Parallel: one thread per EID, each reading all loci from its own TabixFile.
+    # Thread-safe because no two threads share a file handle.
+    def _fetch_eid(item: tuple) -> tuple[str, list[str]]:
+        eid, tbx = item
+        states: list[str] = []
+        for chrom, start in loci:
+            try:
+                rows = list(tbx.fetch(chrom, start, start + resolution_bp))
+                states.append(rows[0].split("\t")[3] if rows else "15_Quies")
+            except ValueError:
+                states.append("15_Quies")
+        return eid, states
 
-    for chrom, start in loci:
-        eid_states = lookup.query_region(chrom, start, start + resolution_bp)
-        for tissue, eids in TISSUE_GROUPS.items():
-            for eid in eids:
-                tissue_states[tissue].append(eid_states.get(eid, "15_Quies"))
+    with ThreadPoolExecutor(max_workers=len(lookup._handles)) as pool:
+        eid_state_map: dict[str, list[str]] = dict(pool.map(_fetch_eid, lookup._handles.items()))
+
+    tissue_states: dict[str, list[str]] = {t: [] for t in TISSUE_GROUPS}
+    for tissue, eids in TISSUE_GROUPS.items():
+        for eid in eids:
+            tissue_states[tissue].extend(eid_state_map.get(eid, ["15_Quies"] * len(loci)))
 
     matrix: dict[str, dict] = {}
     for tissue, states in tissue_states.items():
@@ -212,25 +234,10 @@ def summarize_feature(
         if n == 0:
             continue
         counts = Counter(states)
-        dominant = counts.most_common(1)[0][0]
-        active_n = sum(c for s, c in counts.items() if s not in QUIESCENT_STATES)
-        active_fraction = active_n / n
-        top_non_quies = {
-            s: round(c / n, 3)
-            for s, c in counts.most_common()
-            if s not in QUIESCENT_STATES and c / n >= min_state_frac
-        }
-        matrix[tissue] = {
-            "dominant": dominant,
-            "active_fraction": round(active_fraction, 3),
-            "top_non_quies": top_non_quies,
-        }
+        top_states = [
+            (s, round(c / n, 3))
+            for s, c in counts.most_common(n_top_states)
+        ]
+        matrix[tissue] = {"top_states": top_states}
 
-    active_in = [t for t in TISSUE_GROUPS if matrix.get(t, {}).get("active_fraction", 0) >= active_threshold]
-    inactive_in = [t for t in TISSUE_GROUPS if matrix.get(t, {}).get("active_fraction", 1) < active_threshold]
-
-    return {
-        "active_in": active_in,
-        "inactive_in": inactive_in,
-        "matrix": matrix,
-    }
+    return {"matrix": matrix}
