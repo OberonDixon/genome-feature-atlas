@@ -21,11 +21,14 @@ class LLMClient:
         self.thinking = thinking
         self.system = system
 
-    def ask(self, prompt, thinking=None):
+    def ask(self, prompt, thinking=None, max_tokens: int = 4096):
         """Send a prompt and return the response content as a string.
 
         prompt: str, or a list of message dicts for multi-turn.
         thinking: overrides instance default if provided.
+        max_tokens: total token budget for thinking + response. 4096 is enough
+            for a ~1500-token thinking block plus a ~200-token JSON response.
+            Increase if thinking blocks are being truncated.
         """
         thinking = self.thinking if thinking is None else thinking
 
@@ -44,6 +47,7 @@ class LLMClient:
         response = self._client.chat.completions.create(
             model=self.model,
             messages=messages,
+            max_tokens=max_tokens,
             extra_body=extra_body,
         )
         return response.choices[0].message.content

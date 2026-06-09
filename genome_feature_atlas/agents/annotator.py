@@ -85,13 +85,36 @@ def _extract_thinking(raw: str) -> str:
 def _parse_json(raw: str) -> dict:
     """Extract and parse the JSON object from raw model output.
 
-    Strips <think>...</think> blocks and markdown fences before searching for
-    JSON, so that brace characters inside the thinking text don't shadow the
-    actual response. Returns an error dict rather than raising so that a batch
-    run does not abort on a single bad response.
+    If a complete <think>...</think> block is present, search for JSON only in
+    the text after it, so brace characters in the thinking can't shadow the
+    actual response. If thinking is present but truncated (no closing tag —
+    model hit the token budget), fall back to searching for the LAST {...}
+    block in the full text, which is more likely to be the JSON than any
+    partial JSON-like structure inside the thinking.
+
+    Returns an error dict rather than raising so batch runs don't abort.
     """
-    # Strip thinking block first so its { } don't confuse extraction below
-    text = _THINK_RE.sub("", raw).strip()
+    close_idx = raw.rfind("</think>")
+    if close_idx != -1:
+        # Full thinking block present — search after it
+        text = raw[close_idx + len("</think>"):].strip()
+    elif "<think>" in raw:
+        # Truncated thinking — search for the last {...} in the full text,
+        # because the JSON (if any was generated) comes after the thinking
+        text = raw.strip()
+        # Use rfind("}") so we grab the last, not first, complete block
+        end = text.rfind("}")
+        if end == -1:
+            return {"error": "parse_failed", "detail": "truncated thinking, no JSON", "raw": raw[:500]}
+        start = text[:end+1].rfind("{")
+        if start == -1 or start >= end:
+            return {"error": "parse_failed", "detail": "no JSON block found", "raw": raw[:500]}
+        try:
+            return json.loads(text[start:end+1])
+        except json.JSONDecodeError as exc:
+            return {"error": "parse_failed", "detail": str(exc), "raw": raw[:500]}
+    else:
+        text = raw.strip()
 
     # Strip markdown fences if present
     m = _JSON_FENCE_RE.search(text)
