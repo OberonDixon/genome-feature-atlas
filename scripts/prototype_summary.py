@@ -70,6 +70,8 @@ def parse_args() -> argparse.Namespace:
                    help="Top loci per feature (default: 200)")
     p.add_argument("--annotate",        action="store_true",
                    help="Run AnnotatorAgent on each feature; requires vLLM at http://localhost:8000/v1")
+    p.add_argument("--show-thinking",   action="store_true",
+                   help="Print model thinking (<think> blocks) alongside annotations for prompt debugging")
     p.add_argument("--background-json", type=Path, default=None,
                    help="Pre-computed background JSON saved by a prior --output-json run "
                         "(auto-saved as <stem>_background.json). Provides structure/TSS/chromatin "
@@ -159,7 +161,7 @@ def main() -> None:
 
             if annotator_agent is not None:
                 ctx = AgentContext(feature_summary=summary, background_text=bg_text)
-                ann = annotator_agent.run(ctx)
+                ann = annotator_agent.run(ctx, show_thinking=args.show_thinking)
                 print(json.dumps(ann, indent=2, ensure_ascii=False))
                 if args.output_json:
                     results[fid] = {**summary.to_dict(), "annotation": ann}

@@ -34,10 +34,18 @@ class AnnotatorAgent:
         self._client = client or LLMClient(system=self._system, thinking=True)
         self._few_shot = few_shot
 
-    def run(self, ctx: AgentContext) -> dict:
-        """Return a parsed annotation dict for the feature in ctx."""
+    def run(self, ctx: AgentContext, show_thinking: bool = False) -> dict:
+        """Return a parsed annotation dict for the feature in ctx.
+
+        If show_thinking is True, print the <think>...</think> block to stdout
+        before returning so failure modes are visible during prompt iteration.
+        """
         prompt = self._build_prompt(ctx)
         raw = self._client.ask(prompt)
+        if show_thinking:
+            thinking = _extract_thinking(raw)
+            if thinking:
+                print(f"[think] {thinking[:2000]}" + ("…" if len(thinking) > 2000 else ""))
         return _parse_json(raw)
 
     def _build_prompt(self, ctx: AgentContext) -> str:
@@ -65,18 +73,29 @@ def _fmt_few_shot() -> str:
     return "\n".join(lines)
 
 
+_THINK_RE      = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+
+def _extract_thinking(raw: str) -> str:
+    m = _THINK_RE.search(raw)
+    return m.group(1).strip() if m else ""
 
 
 def _parse_json(raw: str) -> dict:
     """Extract and parse the JSON object from raw model output.
 
-    Strips markdown code fences if present. Returns an error dict rather than
-    raising so that a batch run does not abort on a single bad response.
+    Strips <think>...</think> blocks and markdown fences before searching for
+    JSON, so that brace characters inside the thinking text don't shadow the
+    actual response. Returns an error dict rather than raising so that a batch
+    run does not abort on a single bad response.
     """
-    # Try to strip fences
-    m = _JSON_FENCE_RE.search(raw)
-    text = m.group(1) if m else raw.strip()
+    # Strip thinking block first so its { } don't confuse extraction below
+    text = _THINK_RE.sub("", raw).strip()
+
+    # Strip markdown fences if present
+    m = _JSON_FENCE_RE.search(text)
+    text = m.group(1) if m else text
 
     # Find the outermost {...} block in case there is leading/trailing prose
     start = text.find("{")
