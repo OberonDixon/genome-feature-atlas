@@ -14,6 +14,11 @@ polycomb-repressed locus.
 Given a BACKGROUND block (population baseline across many SAE features) and a FEATURE \
 block, output a JSON annotation identifying the most likely biological concept.
 
+IMPORTANT: Output ONLY the JSON object — no analysis prose, no text of any kind before \
+or after the JSON. Begin your response with `{`. Use the `reasoning` field (the FIRST field \
+in the schema) as your scratchpad: write your archetype letter and the key data points that \
+determined it there, then let `label` follow from it.
+
 ═══ READING THE DATA ═══
 
 Gene structure: counts like CDS(×13) are ABSOLUTE COUNTS of loci, NOT percentages.
@@ -39,29 +44,65 @@ Assign exactly one archetype. The archetype determines the label format and conf
       Label leads with: "Constitutive [housekeeping] gene bodies"
 
   B — Active promoter
-      Active TSS in top-3 for ≥6 tissues AND TSS median < 3 kb.
+      Active TSS in top-3 for ≥6 tissues AND TSS median < 5 kb.
+      HARD REQUIREMENT: If "Active TSS" does NOT appear in ANY tissue's top-3 chromatin
+      states, the feature is NOT Archetype B — regardless of CDS fraction, TSS distance,
+      or Weak/Strong transcription elevation. Use Archetype A (gene body) instead.
+      (If TSS median is 3–5 kb but the first-quartile is < 500 bp, Active TSS is still the
+      right call — a long-tailed TSS distribution usually means a mix of proximal and flanking
+      loci, not distal enhancers. Require ≥8 tissues for high confidence in this range.)
       Label leads with: "[Pan-tissue / tissue-selective] active promoter"
 
   C — Distal enhancer
       Distal enhancer elevated vs. background (< 3%) in ≥3 tissues AND intergenic+intron > 60%.
+      HARD REQUIREMENT: "Distal enhancer" MUST appear in the feature's top-3 chromatin states
+      for ≥3 tissues. If Distal enhancer appears in ZERO tissue top-3 lists, the feature is
+      NOT Archetype C — regardless of Ensembl enhancer count or TF motif evidence. Use
+      Archetype G instead (describe the dominant elevated state honestly).
       Label leads with tissue context + "distal enhancer"
 
   D — Polycomb / developmental
-      Polycomb repressed in top-3 for ≥6 tissues (absent from all background top-3).
+      "Polycomb repressed" in top-3 for ≥6 tissues (absent from all background top-3).
+      IMPORTANT: "Weak Polycomb" is a completely different ChromHMM state (low-confidence
+      facultative silencing) and does NOT qualify for Archetype D. Only the state labeled
+      exactly "Polycomb repressed" counts.
       Label leads with: "Polycomb-repressed developmental loci"
 
   E — Heterochromatin
       Heterochromatin in top-3 for ≥6 tissues (absent from most background top-3).
       Label leads with: "Constitutive heterochromatin"
+      TF motifs in heterochromatic features reflect sequence composition, not regulatory
+      activity — omit TF grammar from the label unless a motif is conspicuously dominant
+      (e.g., top-1 by hit count with ≥ 8 hits and clearly non-repeat biology).
 
   F — Constitutive quiescent (background-like)
       Quiescent > 65% in all tissues AND no other state is elevated above background.
       OR: denominator > 5000 with near-background chromatin (Quiescent/WkTx/WkPC only).
-      Label: "Constitutive quiescent — [brief descriptor]"
-      Confidence: automatically low. Do NOT append TF names.
+      ALSO: Do NOT assign Archetype F when CDS fraction ≥ 20% — use Archetype A instead.
+      Label format: "Constitutive quiescent — [LOCUS TYPE ONLY]"
+        Allowed descriptors: "intergenic", "near-gene", "heterochromatic", "pericentromeric",
+        "near-background", "gene-poor", "repeat-dense".
+        STRICTLY FORBIDDEN in label: ANY ChromHMM state name or derivative, including
+        "weakly Polycomb-repressed", "Polycomb-repressed", "weakly distal-enhanced",
+        "weakly transcribed", or any variant. These MUST go in uncertainty_reason only.
+      Confidence: automatically low.
+      NOTE: If Quiescent is dominant but Distal enhancer or Weak Polycomb are
+      clearly elevated vs. background, use Archetype C or G instead — do not force F.
 
   G — Other / mixed
-      Features that span multiple archetypes or have unusual dominant states.
+      Use G when no single archetype cleanly fits. Common G triggers:
+      • "Weak Polycomb" is the most elevated state but "Polycomb repressed" never appears
+        (Weak Polycomb alone ≠ D; it signals facultative repression or chromatin poising)
+      • Distal enhancer is absent from ALL tissue top-3 lists but Ensembl annotations/motifs
+        suggest regulatory function (chromatin state takes precedence over annotations)
+      • Two archetypes each weakly apply (e.g., some gene body + some distal enhancer signal)
+      Label: describe the dominant state(s) honestly, e.g. "Mixed Weak Polycomb/quiescent",
+      "Scattered transcription/enhancer". Use medium confidence.
+
+ARCHETYPE-LOCK: Write the archetype letter and your key evidence in the `reasoning` field \
+FIRST. Your `label` MUST be consistent with the archetype stated in `reasoning`. If you \
+notice a rule violation while writing later fields, go back and fix `reasoning` so the \
+archetype is correct — do NOT let `label` and `uncertainty_reason` contradict each other.
 
 ═══ STEP 2: COMPARE CHROMATIN STATES TO BACKGROUND ═══
 
@@ -88,8 +129,16 @@ Only name a TF in the label if BOTH:
   (a) it has ≥ 4 hits, AND
   (b) its known biology is consistent with the archetype and tissue context.
 
-NR2F1, RUNX3, CTCF, MAFK, and HNF4A appear across many features in this dataset.
+NR2F1, RUNX3, CTCF, MAFK, HNF4A, and MAX appear across many features in this dataset.
 Name them only when they are conspicuously dominant (e.g., top-1 by hit count with ≥ 4 hits).
+Tissue-distribution rule for TF grammar in the LABEL:
+  • ≥ 10 tissues elevated ("truly pan-tissue"): ONLY name pan-transcriptional TFs in the
+    label (SP1, ELF1, ELF4, E2F, NRF1, YY1, CTCF). Lineage TFs (RUNX3, EBF1, HNF4A,
+    MAFK, SPI1, MEF2) must be moved to lineage_specificity, not the label.
+  • 6–9 tissues elevated ("broadly active"): lineage TFs are allowed in the label IF
+    they dominate the motif list, but note the contradiction in uncertainty_reason.
+  • < 6 tissues elevated: use tissue-specific label ("Blood/immune distal enhancer") and
+    lineage TFs are expected.
 TBX21 with negative or near-zero avg_sc (e.g., −3 to +2) is unreliable — deprioritize it.
 If no motif passes the ≥ 4-hit threshold, omit TF grammar from the label.
 
@@ -104,11 +153,14 @@ Archetype B (Promoter):
   medium Active TSS in 4–7 tissues
 
 Archetype C (Distal enhancer):
-  high   (i) Distal enhancer in top-3 for ≥ 8 tissues, OR
-         (ii) in top-3 for ≥ 4 tissues + ≥ 4 convergent TF motifs with ≥ 3 hits each
-  medium Distal enhancer elevated in 3–7 tissues, or motif evidence thin
-  Special: single-tissue elevation ≥ 25% (e.g., 39% in Adipose) + any corroborating
-           signal (motifs or structure) → at least medium, possibly high if very extreme
+  PROCEDURE: Count the tissues where Distal enhancer appears in the feature's top-3.
+    ≥ 8 tissues → HIGH.  3–7 tissues → MEDIUM.  < 3 tissues → LOW or Archetype G.
+  high   (i) COUNT ≥ 8, OR
+         (ii) COUNT 4–7 + ≥ 4 convergent TF motifs with ≥ 3 hits each.
+         Do NOT downgrade to medium because quiescent also dominates — quiescent is
+         always #1 for most features; the distal enhancer count is what matters.
+  medium COUNT 3–7, or motif evidence thin
+  Special: single-tissue elevation ≥ 25% + any corroborating signal → at least medium
 
 Archetype D (Polycomb):
   high   Polycomb repressed in top-3 for ≥ 8 tissues
@@ -132,12 +184,18 @@ low = profile matches background throughout.
 Lead with the archetype concept, then tissue context, then TFs (only if they pass Step 3).
   GOOD (A): "Constitutive housekeeping gene bodies — ELF1/E2F8/SP1 grammar"
   GOOD (B): "Pan-tissue active promoter — SP1/EGR1 grammar"
-  GOOD (C): "Adipose-restricted distal enhancer — HNF4A/NR2F1 grammar"
-  GOOD (C): "Pan-tissue distal enhancer — MAFK/EBF1 grammar"
+  GOOD (C): "Adipose-restricted distal enhancer — HNF4A/NR2F1 grammar"  (< 6 tissues)
+  GOOD (C): "Broadly active distal enhancer — RUNX3/EBF1 grammar"       (6–9 tissues, blood TFs OK)
+  GOOD (C): "Pan-tissue distal enhancer — SP1/ELF1 grammar"             (≥10 tissues, pan-TFs only)
   GOOD (D): "Polycomb-repressed developmental loci — EBF1/EGR1 grammar"
   GOOD (F): "Constitutive quiescent intergenic — near-background"
-  BAD:  "Broad distal enhancer with NR2F1/RUNX3 grammar"  ← these TFs appear everywhere
-  BAD:  "Gene body enhancer"                               ← pick one: gene body OR enhancer
+  GOOD (F): "Constitutive quiescent intergenic — heterochromatic"        (heterochromatin IS present)
+  BAD:  "Broad distal enhancer with NR2F1/RUNX3 grammar"                 ← background TFs
+  BAD:  "Gene body enhancer"                                             ← pick one
+  BAD:  "Constitutive quiescent — weakly Polycomb-repressed"             ← ChromHMM state in F label; FORBIDDEN
+  BAD:  "Constitutive quiescent — weakly distal-enhanced"                ← ChromHMM state in F label; FORBIDDEN
+  BAD:  "Pan-tissue distal enhancer — EBF1/SPI1 grammar"                 ← blood TFs in ≥10-tissue label; put in lineage_specificity
+  BAD:  "Pan-tissue active promoter — CEBPB grammar"                     ← Active TSS absent from all top-3; use Archetype A
 
 Archetype tie-breaking: When two archetypes both seem to apply (e.g., Distal enhancer
 elevated in 7 tissues AND Heterochromatin elevated in 9 tissues), pick the one absent
@@ -148,9 +206,15 @@ lineage_specificity: Use the tissue name when 1–4 tissues show the key chromat
   Write "pan-tissue" if ≥ 8 tissues are elevated. Null for archetypes F, and for D/E unless
   one tissue dominates. Always include the supporting TF evidence for any tissue claim.
 
-distinctive_vs_background: Give the SINGLE most surprising comparison stat with exact numbers.
+distinctive_vs_background: 1–2 sentences MAXIMUM. State the single most surprising elevated
+  state with EXACT NUMBERS: tissue count, percentage range, and background comparison. STOP.
+  Do NOT enumerate individual tissue names. Do NOT describe which background tissues show a state.
+  Do NOT repeat the label. Do NOT add a second sentence unless it adds genuinely distinct data.
   GOOD: "Strong transcription 30–42% in all 12 tissues vs. background 0% (absent from all top-3)"
+  GOOD: "Distal enhancer 12–25% in 8 of 12 tissues vs. background < 3% (absent from background top-3)"
   BAD:  "Elevated distal enhancer and immune TF motifs consistent with regulatory regions"
+  BAD:  "Weak Polycomb 8–20% across all 12 tissues but present in background top-3 for Blood, \
+Brain, Muscle [... listing individual tissues ...]"
 
 uncertainty_reason: Only write this if there is a GENUINE conflict or data gap that prevents
   confident interpretation. Do not invent ambiguity. If two dimensions agree and support the
@@ -160,6 +224,7 @@ uncertainty_reason: Only write this if there is a GENUINE conflict or data gap t
 
 Output ONLY valid JSON — no markdown fences, no text before or after:
 {
+  "reasoning": "<1-3 sentences: archetype letter + key data points that determined it>",
   "label": "<5-10 word phrase>",
   "activation_profile": "<coverage>-<steepness>",
   "distinctive_vs_background": "<single most surprising stat with exact numbers>",
@@ -198,6 +263,10 @@ Regulatory: enhancer(×17)  promoter(×13)  CTCF binding site(×5)
 Motifs:     ELF1,ELF4(avg_sc=9.2,×10)  RUNX3(avg_sc=7.4,×7)  E2F8(avg_sc=3.9,×6)  CTCF(avg_sc=4.8,×5)  SP1(avg_sc=6.6,×5)  ELF1,ETV6,GABPA(avg_sc=7.9,×4)""",
         """\
 {
+  "reasoning": "Archetype A: Strong transcription in top-3 for all 12 tissues (30–42%) \
+and CDS 164/200 = 82%, far exceeding the >20% threshold. Active TSS appears in most \
+tissues but is subordinate to Strong transcription — this is a gene body, not a promoter. \
+Pan-tissue Strong transcription + high CDS locks archetype A.",
   "label": "Constitutive housekeeping gene bodies — ELF1/E2F8/SP1 grammar",
   "activation_profile": "moderate-steep",
   "distinctive_vs_background": "Strong transcription 30–42% in all 12 tissues vs. \
@@ -234,17 +303,22 @@ Regulatory: enhancer(×61)  promoter(×8)  CTCF binding site(×4)
 Motifs:     RUNX3(avg_sc=7.7,×8)  BACH1(avg_sc=10.7,×6)  CTCF(avg_sc=4.0,×5)  MAFK(avg_sc=6.8,×5)  NR2F1(avg_sc=9.1,×5)  EBF1(avg_sc=6.0,×4)""",
         """\
 {
-  "label": "Pan-tissue distal enhancer — RUNX3/BACH1/EBF1 grammar",
+  "reasoning": "Archetype C: Distal enhancer in top-3 for 7 tissues (8–17%) vs. background \
+< 3%; intergenic(×114) + intron(×66) = 90% of loci confirm distal location. 7-tissue \
+elevation = 'broadly active' (6–9 range; pan-tissue requires ≥10). ≥4 hematopoietic TF \
+motifs (RUNX3×8, BACH1×6, MAFK×5, EBF1×4) each with ≥4 hits confirm regulatory identity — \
+blood TFs are permitted in the label at 6–9 tissue elevation.",
+  "label": "Broadly active distal enhancer — RUNX3/BACH1/EBF1 grammar",
   "activation_profile": "broad-flat",
-  "distinctive_vs_background": "Distal enhancer 8–17% in 6 of 12 tissues vs. background \
+  "distinctive_vs_background": "Distal enhancer 8–17% in 7 of 12 tissues vs. background \
 < 3% (absent from all background top-3); ≥4 hematopoietic TF motifs with high hit counts \
 (RUNX3 ×8, BACH1 ×6, MAFK ×5, EBF1 ×4) and 61× Ensembl enhancers confirm regulatory identity.",
   "lineage_specificity": "Hematopoietic grammar: RUNX3 (T-cell/myeloid), BACH1 \
 (erythroid/myeloid), EBF1 (B-cell), MAFK (megakaryocyte/mast); Distal enhancer is \
 elevated broadly but the TF motif cluster is blood-skewed.",
   "confidence": "high",
-  "uncertainty_reason": "Distal enhancer is elevated across 6 non-immune tissues as well, \
-suggesting the TF grammar is more broadly active than the lineage label implies."
+  "uncertainty_reason": "Distal enhancer is elevated across 7 tissues spanning immune and \
+non-immune lineages, suggesting the TF grammar is more broadly active than the lineage label implies."
 }""",
     ),
     # ── Feature 46: constitutive quiescent — Archetype F, low ────────────────────
@@ -271,6 +345,11 @@ Regulatory: enhancer(×2)
 Motifs:     ELF1,ELF4(avg_sc=7.2,×1)""",
         """\
 {
+  "reasoning": "Archetype F: Quiescent 74–88% in all 12 tissues with nothing clearly \
+elevated above background except occasional Heterochromatin (Skin, Reproductive). CDS = 0. \
+Weak Polycomb 5–12% but present in background top-3, so not distinctive. Distal enhancer \
+absent from all tissue top-3 — Archetype C excluded. No Strong transcription — A/B excluded. \
+Dominant pattern is constitutive quiescent background; locus type is intergenic (170/200 loci).",
   "label": "Constitutive quiescent intergenic — weakly heterochromatic",
   "activation_profile": "broad-flat",
   "distinctive_vs_background": "Quiescent 74–88% across all tissues vs. background 35–50%; \
